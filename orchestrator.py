@@ -63,11 +63,15 @@ async def bridge_websocket(plivo_ws: WebSocket):
     pcm_buffer = np.array([], dtype=np.float32)
 
     try:
+        import time as _time
+
         # Wait for Plivo's start event
+        t0 = _time.monotonic()
         first_msg = await plivo_ws.receive_text()
         data = json.loads(first_msg)
         call_id = data.get("start", {}).get("callId", "unknown")
-        log.info(f"[{call_id}] Plivo stream started")
+        t1 = _time.monotonic()
+        log.info(f"[{call_id}] Plivo stream started ({t1-t0:.1f}s wait)")
 
         # Connect to PersonaPlex
         params = urlencode({
@@ -80,19 +84,27 @@ async def bridge_websocket(plivo_ws: WebSocket):
         ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
         ssl_ctx.check_hostname = False
         ssl_ctx.verify_mode = ssl.CERT_NONE
+        t2 = _time.monotonic()
         persona_ws = await websockets.connect(persona_url, ssl=ssl_ctx)
-        log.info(f"[{call_id}] Connected to PersonaPlex")
+        t3 = _time.monotonic()
+        log.info(f"[{call_id}] Connected to PersonaPlex ({t3-t2:.1f}s)")
 
         # Wait for handshake byte (b"\x00")
+        log.info(f"[{call_id}] Waiting for handshake...")
         handshake = await persona_ws.recv()
+        t4 = _time.monotonic()
         if isinstance(handshake, bytes) and handshake == b"\x00":
-            log.info(f"[{call_id}] Received PersonaPlex handshake OK")
+            log.info(f"[{call_id}] Handshake OK ({t4-t3:.1f}s) — Total setup: {t4-t0:.1f}s")
         else:
-            log.warning(f"[{call_id}] Unexpected handshake: {handshake!r}")
+            log.warning(f"[{call_id}] Unexpected handshake: {handshake!r} ({t4-t3:.1f}s)")
+
+        bridge_start_time = _time.monotonic()
+        first_audio_sent = False
+        first_audio_recv = False
 
         async def plivo_to_persona():
             """Plivo mulaw 8kHz -> PCM 24kHz -> Opus encode -> PersonaPlex"""
-            nonlocal running, media_recv_count, pcm_buffer
+            nonlocal running, media_recv_count, pcm_buffer, first_audio_sent
             try:
                 while running:
                     msg = await plivo_ws.receive_text()
@@ -127,6 +139,9 @@ async def bridge_websocket(plivo_ws: WebSocket):
                             opus_bytes = opus_writer.read_bytes()
                             if len(opus_bytes) > 0 and persona_ws:
                                 await persona_ws.send(b"\x01" + opus_bytes)
+                                if not first_audio_sent:
+                                    first_audio_sent = True
+                                    log.info(f"[{call_id}] FIRST audio sent to Persona ({_time.monotonic()-bridge_start_time:.1f}s after bridge start)")
 
                         if media_recv_count <= 5 or media_recv_count % 200 == 0:
                             log.info(f"[{call_id}] Plivo->Persona #{media_recv_count} mulaw={len(mulaw_bytes)}b buf={len(pcm_buffer)}")
@@ -142,7 +157,7 @@ async def bridge_websocket(plivo_ws: WebSocket):
 
         async def persona_to_plivo():
             """PersonaPlex Opus -> PCM 24kHz -> mulaw 8kHz -> Plivo"""
-            nonlocal running, media_send_count
+            nonlocal running, media_send_count, first_audio_recv
             try:
                 async for message in persona_ws:
                     if not running:
@@ -181,6 +196,9 @@ async def bridge_websocket(plivo_ws: WebSocket):
                                 }))
 
                                 media_send_count += 1
+                                if not first_audio_recv:
+                                    first_audio_recv = True
+                                    log.info(f"[{call_id}] FIRST audio from Persona ({_time.monotonic()-bridge_start_time:.1f}s after bridge start)")
                                 if media_send_count <= 5 or media_send_count % 200 == 0:
                                     log.info(f"[{call_id}] Persona->Plivo #{media_send_count} pcm={len(pcm_24k)} mulaw={len(mulaw_bytes)}b")
 
