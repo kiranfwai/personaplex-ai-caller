@@ -11,7 +11,6 @@ import json
 import base64
 import logging
 import ssl
-import struct
 import traceback
 from datetime import datetime
 from urllib.parse import urlencode
