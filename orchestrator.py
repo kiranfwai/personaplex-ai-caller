@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from config import (
     PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN, PLIVO_FROM_NUMBER,
     RUNPOD_PUBLIC_IP, ORCHESTRATOR_PORT, PERSONAPLEX_PORT,
+    VOICE_PROMPT, TEXT_PROMPT,
 )
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
@@ -70,8 +71,8 @@ async def bridge_websocket(plivo_ws: WebSocket):
 
         # Connect to PersonaPlex
         params = urlencode({
-            "voice_prompt": "NATF0.pt",
-            "text_prompt": "You are a friendly sales representative. Be concise and helpful.",
+            "voice_prompt": VOICE_PROMPT,
+            "text_prompt": TEXT_PROMPT,
         })
         persona_url = f"wss://localhost:{PERSONAPLEX_PORT}/api/chat?{params}"
         log.info(f"[{call_id}] Connecting to PersonaPlex...")
