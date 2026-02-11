@@ -141,7 +141,7 @@ async def bridge_websocket(plivo_ws: WebSocket):
                         # Read encoded Opus bytes and send to PersonaPlex
                         # Moshi protocol: b"\x01" prefix = audio data
                         opus_bytes = opus_writer.read_bytes()
-                        if len(opus_bytes) > 0 and persona_ws and persona_ws.open:
+                        if len(opus_bytes) > 0 and persona_ws:
                             await persona_ws.send(b"\x01" + opus_bytes)
 
                         if media_recv_count <= 3 or media_recv_count % 200 == 0:
