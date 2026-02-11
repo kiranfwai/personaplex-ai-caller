@@ -12,7 +12,7 @@ PLIVO_AUTH_TOKEN = os.environ.get("PLIVO_AUTH_TOKEN", "YOUR_PLIVO_AUTH_TOKEN")
 PLIVO_FROM_NUMBER = os.environ.get("PLIVO_FROM_NUMBER", "+91XXXXXXXXXX")
 
 # Public URL (ngrok or RunPod proxy — no port, no trailing slash)
-RUNPOD_PUBLIC_IP = "abby-pseudolateral-nonmountainously.ngrok-free.dev"
+RUNPOD_PUBLIC_IP = "l38miw3u62gp7q-3000.proxy.runpod.net"
 
 # Ports
 ORCHESTRATOR_PORT = 3000
