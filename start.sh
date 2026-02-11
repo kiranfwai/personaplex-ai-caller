@@ -29,6 +29,9 @@ echo "[1/4] Installing dependencies..."
 if ! python -c "import moshi" 2>/dev/null; then
     echo "  Installing moshi from $PERSONA_DIR/moshi/..."
     pip install "$PERSONA_DIR/moshi/" -q
+    # Moshi downgrades PyTorch — reinstall correct version
+    echo "  Fixing PyTorch version (moshi downgrades it)..."
+    pip install torch==2.8.0 torchaudio==2.8.0 torchvision==0.23.0 --index-url https://download.pytorch.org/whl/cu128 -q
 fi
 
 # Install caller dependencies
