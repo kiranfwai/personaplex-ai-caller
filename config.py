@@ -22,8 +22,8 @@ PERSONAPLEX_PORT = 8998
 PLIVO_SAMPLE_RATE = 8000
 PERSONAPLEX_SAMPLE_RATE = 24000
 
-# PersonaPlex voice prompt (.pt file from model voices directory)
-VOICE_PROMPT = "NATF0.pt"
+# PersonaPlex voice prompt (.pt preset or custom .wav file for voice cloning)
+VOICE_PROMPT = "/workspace/caller/indian_voice_10s.wav"
 
 # Agent configuration (used in text prompt)
 AGENT_NAME = "Priya"
