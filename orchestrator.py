@@ -40,8 +40,8 @@ call_log = []
 SAMPLE_RATE = 24000  # PersonaPlex native sample rate
 PLIVO_RATE = 8000
 
-# Buffering: accumulate 960 samples at 24kHz (40ms) before Opus encoding
-OPUS_FRAME_SAMPLES = 960
+# Buffering: accumulate 480 samples at 24kHz (20ms) — minimum Opus frame for low latency
+OPUS_FRAME_SAMPLES = 480
 
 
 # ---- Bridge WebSocket endpoint ----
@@ -202,9 +202,13 @@ async def bridge_websocket(plivo_ws: WebSocket):
         log.error(f"[{call_id}] Bridge fatal error: {type(e).__name__}: {e}")
         log.error(traceback.format_exc())
     finally:
+        # Clean up session resources
         if persona_ws:
             await persona_ws.close()
-        log.info(f"[{call_id}] Bridge CLOSED. Total recv={media_recv_count} sent={media_send_count}")
+        pcm_buffer = np.array([], dtype=np.float32)
+        del opus_writer
+        del opus_reader
+        log.info(f"[{call_id}] Bridge CLOSED. Buffers cleared. Total recv={media_recv_count} sent={media_send_count}")
 
 
 # ---- Plivo endpoints ----
