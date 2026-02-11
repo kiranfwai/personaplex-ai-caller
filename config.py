@@ -26,7 +26,7 @@ PERSONAPLEX_SAMPLE_RATE = 24000
 VOICE_PROMPT = "/workspace/caller/indian_voice_10s.wav"
 
 # Agent configuration (used in text prompt)
-AGENT_NAME = "Priya"
+AGENT_NAME = "Rahul"
 COMPANY_NAME = "Freedom With AI"
 LOCATION = "Hyderabad"
 CUSTOMER_NAME = "there"  # Default; override per-call if needed
