@@ -4,12 +4,14 @@ Handles Plivo calls, answer XML, and WebSocket audio bridge to PersonaPlex.
 Uses Opus encoding/decoding for PersonaPlex's Moshi protocol.
 """
 import asyncio
+import audioop
 import csv
 import io
 import json
 import base64
 import logging
 import ssl
+import struct
 import traceback
 from datetime import datetime
 from urllib.parse import urlencode
@@ -36,38 +38,10 @@ plivo_client = plivo.RestClient(PLIVO_AUTH_ID, PLIVO_AUTH_TOKEN)
 call_log = []
 
 SAMPLE_RATE = 24000  # PersonaPlex native sample rate
+PLIVO_RATE = 8000
 
-# ---- Audio conversion (mulaw) ----
-MULAW_DECODE_TABLE = np.zeros(256, dtype=np.int16)
-for i in range(256):
-    val = ~i
-    sign = val & 0x80
-    exponent = (val >> 4) & 0x07
-    mantissa = val & 0x0F
-    sample = (mantissa << 3) + 0x84
-    sample <<= exponent
-    sample -= 0x84
-    MULAW_DECODE_TABLE[i] = -sample if sign else sample
-
-def mulaw_decode(mulaw_bytes):
-    indices = np.frombuffer(mulaw_bytes, dtype=np.uint8)
-    return MULAW_DECODE_TABLE[indices]
-
-def mulaw_encode(pcm_samples):
-    MULAW_MAX = 0x1FFF
-    MULAW_BIAS = 0x84
-    samples = pcm_samples.astype(np.int32)
-    sign = np.where(samples < 0, 0x80, 0)
-    samples = np.abs(samples)
-    samples = np.minimum(samples, MULAW_MAX)
-    samples = samples + MULAW_BIAS
-    exponent = np.zeros(len(samples), dtype=np.int32)
-    for exp in range(7, 0, -1):
-        mask = 1 << (exp + 3)
-        exponent = np.where((samples & mask) != 0, exp, exponent)
-    mantissa = (samples >> (exponent + 3)) & 0x0F
-    mulaw_byte = ~(sign | (exponent << 4) | mantissa) & 0xFF
-    return mulaw_byte.astype(np.uint8).tobytes()
+# Buffering: accumulate 960 samples at 24kHz (40ms) before Opus encoding
+OPUS_FRAME_SAMPLES = 960
 
 
 # ---- Bridge WebSocket endpoint ----
@@ -84,6 +58,9 @@ async def bridge_websocket(plivo_ws: WebSocket):
     # Opus encoder/decoder for PersonaPlex protocol
     opus_writer = sphn.OpusStreamWriter(SAMPLE_RATE)
     opus_reader = sphn.OpusStreamReader(SAMPLE_RATE)
+
+    # Buffer for accumulating PCM before Opus encoding
+    pcm_buffer = np.array([], dtype=np.float32)
 
     try:
         # Wait for Plivo's start event
@@ -115,7 +92,7 @@ async def bridge_websocket(plivo_ws: WebSocket):
 
         async def plivo_to_persona():
             """Plivo mulaw 8kHz -> PCM 24kHz -> Opus encode -> PersonaPlex"""
-            nonlocal running, media_recv_count
+            nonlocal running, media_recv_count, pcm_buffer
             try:
                 while running:
                     msg = await plivo_ws.receive_text()
@@ -124,28 +101,35 @@ async def bridge_websocket(plivo_ws: WebSocket):
                     if ev == "media":
                         media_recv_count += 1
                         payload = d["media"]["payload"]
-
-                        # Decode mulaw to PCM 8kHz
                         mulaw_bytes = base64.b64decode(payload)
-                        pcm_8k = mulaw_decode(mulaw_bytes)
+
+                        # Decode mulaw -> PCM 16-bit linear using audioop
+                        pcm_16bit = audioop.ulaw2lin(mulaw_bytes, 2)
+
+                        # Convert bytes to numpy int16
+                        pcm_8k = np.frombuffer(pcm_16bit, dtype=np.int16)
 
                         # Resample 8kHz -> 24kHz
                         pcm_24k = resample_poly(pcm_8k, up=3, down=1).astype(np.int16)
 
-                        # Normalize to float32 [-1, 1] for Opus encoder
+                        # Normalize to float32 [-1, 1]
                         pcm_float = pcm_24k.astype(np.float32) / 32768.0
 
-                        # Write to Opus encoder
-                        opus_writer.append_pcm(pcm_float)
+                        # Accumulate in buffer
+                        pcm_buffer = np.concatenate([pcm_buffer, pcm_float])
 
-                        # Read encoded Opus bytes and send to PersonaPlex
-                        # Moshi protocol: b"\x01" prefix = audio data
-                        opus_bytes = opus_writer.read_bytes()
-                        if len(opus_bytes) > 0 and persona_ws:
-                            await persona_ws.send(b"\x01" + opus_bytes)
+                        # Send when we have enough for an Opus frame
+                        while len(pcm_buffer) >= OPUS_FRAME_SAMPLES:
+                            chunk = pcm_buffer[:OPUS_FRAME_SAMPLES]
+                            pcm_buffer = pcm_buffer[OPUS_FRAME_SAMPLES:]
 
-                        if media_recv_count <= 3 or media_recv_count % 200 == 0:
-                            log.info(f"[{call_id}] Plivo->Persona #{media_recv_count} mulaw={len(mulaw_bytes)}b opus={len(opus_bytes)}b")
+                            opus_writer.append_pcm(chunk)
+                            opus_bytes = opus_writer.read_bytes()
+                            if len(opus_bytes) > 0 and persona_ws:
+                                await persona_ws.send(b"\x01" + opus_bytes)
+
+                        if media_recv_count <= 5 or media_recv_count % 200 == 0:
+                            log.info(f"[{call_id}] Plivo->Persona #{media_recv_count} mulaw={len(mulaw_bytes)}b buf={len(pcm_buffer)}")
 
                     elif ev == "stop":
                         log.info(f"[{call_id}] Plivo stream stopped")
@@ -153,6 +137,7 @@ async def bridge_websocket(plivo_ws: WebSocket):
                         break
             except Exception as e:
                 log.error(f"[{call_id}] Plivo->Persona error: {type(e).__name__}: {e}")
+                log.error(traceback.format_exc())
                 running = False
 
         async def persona_to_plivo():
@@ -163,7 +148,6 @@ async def bridge_websocket(plivo_ws: WebSocket):
                     if not running:
                         break
                     if isinstance(message, bytes) and len(message) > 0:
-                        # PersonaPlex sends b"\x01" + opus_data for audio
                         prefix = message[0:1]
                         if prefix == b"\x01" and len(message) > 1:
                             opus_data = message[1:]
@@ -179,8 +163,11 @@ async def bridge_websocket(plivo_ws: WebSocket):
                                 # Resample 24kHz -> 8kHz
                                 pcm_8k = resample_poly(pcm_24k, up=1, down=3).astype(np.int16)
 
-                                # Encode to mulaw
-                                mulaw_bytes = mulaw_encode(pcm_8k)
+                                # Convert int16 numpy -> bytes for audioop
+                                pcm_bytes = pcm_8k.tobytes()
+
+                                # Encode to mulaw using audioop
+                                mulaw_bytes = audioop.lin2ulaw(pcm_bytes, 2)
                                 mulaw_b64 = base64.b64encode(mulaw_bytes).decode("ascii")
 
                                 # Send to Plivo
@@ -194,7 +181,7 @@ async def bridge_websocket(plivo_ws: WebSocket):
                                 }))
 
                                 media_send_count += 1
-                                if media_send_count <= 3 or media_send_count % 200 == 0:
+                                if media_send_count <= 5 or media_send_count % 200 == 0:
                                     log.info(f"[{call_id}] Persona->Plivo #{media_send_count} pcm={len(pcm_24k)} mulaw={len(mulaw_bytes)}b")
 
                         elif prefix == b"\x00":
@@ -204,6 +191,7 @@ async def bridge_websocket(plivo_ws: WebSocket):
 
             except Exception as e:
                 log.error(f"[{call_id}] Persona->Plivo error: {type(e).__name__}: {e}")
+                log.error(traceback.format_exc())
                 running = False
 
         log.info(f"[{call_id}] Starting bidirectional audio bridge...")
